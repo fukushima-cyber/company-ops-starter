@@ -5,6 +5,7 @@
   "type": "module",
   "engines": { "node": ">=24" },
   "scripts": {
+    "inspect": "node src/cli.mjs inspect",
     "setup": "node src/cli.mjs setup",
     "doctor": "node src/cli.mjs doctor",
     "llm": "node src/cli.mjs llm",

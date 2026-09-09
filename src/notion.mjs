@@ -49,19 +49,34 @@ export async function checkDatabase(api, id, schema, parent) {
   }
   return { id: db.id, dataSourceId: source.id, url: db.url ?? `https://www.notion.so/${db.id.replaceAll("-", "")}` };
 }
-export async function provision(config, api, checkpoint) {
+export async function planProvision(config, api) {
   const parent = notionId(config.notionParent);
   await api(`/pages/${parent}`);
   const existing = await children(api, parent);
-  config.databases ??= {};
+  const plan = [];
   for (const [key, schema] of Object.entries(schemas(config))) {
     const name = `${config.name} · ${schema.name} [${config.id}]`;
-    let id = config.databases[key]?.id;
+    let id = config.databases?.[key]?.id;
     if (!id) {
-      const matches = existing.filter((block) => block.type === "child_database" && block.child_database.title === name);
+      const matches = existing.filter((block) => block.type === "child_database" && [name, schema.name].includes(block.child_database.title));
       if (matches.length > 1) throw new Error(`${name}: 同名DBが複数あります。IDを指定してください。`);
       id = matches[0]?.id;
     }
+    const database = id ? await checkDatabase(api, id, schema, parent) : null;
+    plan.push({ key, name, schema, action: id ? "reuse" : "create", database });
+  }
+  const ids = plan.filter((item) => item.database).map((item) => notionId(item.database.id));
+  if (new Set(ids).size !== ids.length) throw new Error("同じDBを複数の役割に指定できません。");
+  return plan;
+}
+export async function provision(config, api, checkpoint, approvedPlan) {
+  const plan = await planProvision(config, api);
+  const signature = (items) => JSON.stringify(items.map(({ key, action, database }) => [key, action, database?.id]));
+  if (approvedPlan && signature(approvedPlan) !== signature(plan)) throw new Error("確認後にNotionの構成が変わりました。変更せず停止します。再実行して計画を確認してください。");
+  const parent = notionId(config.notionParent);
+  config.databases ??= {};
+  for (const { key, name, schema, database } of plan) {
+    let id = database?.id;
     if (!id) {
       // Never blindly retry a creation after an uncertain response; rediscover on rerun.
       const db = await api("/databases", "POST", { parent: { type: "page_id", page_id: parent }, title: [{ type: "text", text: { content: name } }], initial_data_source: { properties: schema.properties } });

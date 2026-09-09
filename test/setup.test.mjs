@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { validate, instanceDir, notionId, writeJson } from "../src/config.mjs";
-import { schemas, provision, checkDatabase, children, notionClient } from "../src/notion.mjs";
+import { schemas, provision, planProvision, checkDatabase, children, notionClient } from "../src/notion.mjs";
 import { environment, configureRuntime, registerJobs } from "../src/runtime.mjs";
 import { render } from "../src/render.mjs";
 import { runReport, reportEnvironment } from "../src/reports.mjs";
@@ -43,6 +43,36 @@ test("Notion provisioning creates three databases and reruns without duplication
   assert.equal(fake.count, 3); assert.equal(checkpoints, 6);
   await provision(c, fake.api, async () => {}); assert.equal(fake.count, 3);
   assert.ok(c.databases.tasks.dataSourceId);
+});
+test("planning is read-only and explicit existing databases can have arbitrary titles", async () => {
+  const c = config(), fake = fakeNotion();
+  const plan = await planProvision(c, fake.api);
+  assert.equal(fake.count, 0); assert.deepEqual(c.databases, {});
+  assert.ok(plan.every((item) => item.action === "create"));
+  await provision(c, fake.api, async () => {}, plan);
+  for (const db of fake.dbs.values()) db.title = "既存の業務DB";
+  assert.ok((await planProvision(c, fake.api)).every((item) => item.action === "reuse"));
+  assert.equal(fake.count, 3);
+});
+test("standard-name existing databases are reused without requiring a new dedicated name", async () => {
+  const c = config(), fake = fakeNotion(); await provision(c, fake.api, async () => {});
+  for (const [key, schema] of Object.entries(schemas(c))) fake.dbs.get(c.databases[key].id).title = schema.name;
+  c.databases = {};
+  await provision(c, fake.api, async () => {}); assert.equal(fake.count, 3);
+});
+test("a later schema conflict prevents creating even the earlier missing databases", async () => {
+  const c = config(), fake = fakeNotion(); await provision(c, fake.api, async () => {});
+  fake.dbs.delete(c.databases.inbox.id); delete c.databases.inbox;
+  fake.dbs.get(c.databases.tasks.id).properties.承認.type = "rich_text";
+  await assert.rejects(provision(c, fake.api, async () => {}), /承認/);
+  assert.equal(fake.count, 3);
+});
+test("a changed plan requires reapproval before mutation", async () => {
+  const c = config(), fake = fakeNotion();
+  const plan = await planProvision(c, fake.api);
+  await provision(config(), fake.api, async () => {});
+  await assert.rejects(provision(c, fake.api, async () => {}, plan), /確認後/);
+  assert.deepEqual(c.databases, {}); assert.equal(fake.count, 3);
 });
 test("Notion response-loss recovery rediscovers the created database", async () => {
   const c = config(), fake = fakeNotion(); fake.failNext();

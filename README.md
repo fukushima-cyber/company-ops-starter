@@ -4,16 +4,17 @@
 
 ## 導入
 
-実行環境はmacOSまたはLinux、Node.js 24以上、Git、Bash、curl。議事録機能には[Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/installation/)を導入し、`hermes`をPATHに通してください。別会社には専用のOSユーザーまたはVPSを用意します。
+実行環境はmacOSまたはLinux、Node.js 24以上。まず管理者の既存環境を確認し、不足しているものだけ導入します。レポート機能にはBashとcurl、議事録機能には[Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/installation/)が必要です。既にインストール済みなら入れ直す必要はありません。別会社には専用のOSユーザーまたはVPSを用意します。
 
 1. このprivateリポジトリへのアクセス権を導入担当者へ付与します。
-2. 導入先のNotionで[内部インテグレーション](https://www.notion.so/profile/integrations)を作り、読み取り・挿入・更新を許可します。専用の空の親ページを作り、そのページの「接続」からインテグレーションを追加してください。
+2. 導入先のNotionで既存の[内部インテグレーション](https://www.notion.so/profile/integrations)と親ページを確認します。対象業務への読み取り・挿入・更新権限があれば再利用でき、新規作成は不要です。ページの「接続」から連携へ共有してください。利用できるものがない場合だけ新しく用意します。
 3. 以下を実行します。
 
 ```bash
 git clone https://github.com/fukushima-cyber/company-ops-starter.git
 cd company-ops-starter
 npm ci
+npm run inspect
 npm run setup
 npm run doctor
 npm run verify:llm
@@ -21,7 +22,13 @@ npm run jobs
 npm start
 ```
 
-`setup`が会社名、会議名、担当者、Notion親ページ・トークン、利用機能を質問します。Notionの必要なDBを自動作成し、議事録用LLMはHermesのモデル選択画面で認証まで設定します。トークン入力は非表示です。APIキーの発行、Notionの共有許可、LLMサービスの契約は各社の管理者が行う必要があります。
+`inspect`は管理者環境のコマンド・設定済み会社・既存Hermes設定の有無を読み取り確認します。インストールや認証情報のコピーは行いません。`setup`も最初にこの確認を行い、会社名、会議名、担当者、Notion親ページ・トークン、利用機能を質問します。同じ会社IDの保存済み設定は初期値に使い、保存済みトークンは空欄で維持できます。
+
+親ページ内の既存DBを一覧表示し、役割ごとに再利用するDBのURL/IDを指定できます。未指定の場合は専用名または標準名で照合します。列の型・選択肢・所属ページを全件確認してから「再利用／新規作成」の計画を表示し、管理者が承認した場合だけ適用します。別名DBは明示指定が必要です。不適合な既存DBを勝手に作り替えたり、別のDBを作って回避したりしません。
+
+会社専用のLLM設定が既にあれば維持し、未設定の場合だけHermesのモデル選択画面を開きます。既存APIキー・契約・ダッシュボード組織も利用できます。管理者個人の`~/.hermes`は存在確認のみで、別会社への認証流用やジョブ混在を避けるため自動移行しません。そちらの認証を使う場合は、対象会社での利用権限を確認したうえで`npm run llm`から設定してください。
+
+確認だけで終える場合は`npm run setup -- --config <設定JSON> --plan`。Notionは読み取りのみで、ローカル設定も保存しません。非対話環境で適用する場合は、計画確認後に`--yes`を明示します。必要な実行環境が不足していればDB作成前に停止します。APIキーの発行や権限付与が必要な場合は各社の管理者が行ってください。
 
 `doctor`はNotionの列・選択肢・親ページと接続を確認します。`verify:llm`は短いテスト文を設定済みLLMへ送信します（少額のAPI利用料が発生する場合があります）。業務データは送らず、議事録用の診断ではMCP・プラグイン・ルール注入を無効化します。実際の議事録処理は最後の受入テストで確認します。
 

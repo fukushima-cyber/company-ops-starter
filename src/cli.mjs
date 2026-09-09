@@ -3,46 +3,63 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
 import { parseArgs } from "node:util";
-import { root, validate, instanceDir, readJson, writeJson } from "./config.mjs";
-import { provision, schemas, checkDatabase, notionClient } from "./notion.mjs";
+import { root, validate, instanceDir, readJson, writeJson, notionId } from "./config.mjs";
+import { provision, planProvision, children, schemas, checkDatabase, notionClient } from "./notion.mjs";
 import { render } from "./render.mjs";
 import { execute, environment, configureRuntime, registerJobs } from "./runtime.mjs";
 import { runReport, reportEnvironment } from "./reports.mjs";
 import { complete, apiSettings } from "../report/llm-api.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { withLock } from "./lock.mjs";
+import { inspectEnvironment, showEnvironment, requireEnvironment, hasConfiguredModel } from "./preflight.mjs";
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   instance: { type: "string" }, config: { type: "string" }, offline: { type: "boolean" },
+  plan: { type: "boolean" }, yes: { type: "boolean" },
 } });
 const command = positionals[0];
 async function wizard() {
-  const config = await readJson(path.join(root, "company.example.json"));
+  let config = await readJson(path.join(root, "company.example.json"));
   let muted = false;
   const output = new Writable({ write(chunk, encoding, callback) { if (!muted) process.stdout.write(chunk, encoding); callback(); } });
   const rl = createInterface({ input: process.stdin, output, terminal: Boolean(process.stdin.isTTY) });
   const ask = async (label, fallback = "") => (await rl.question(`${label}${fallback ? ` [${fallback}]` : ""}: `)).trim() || fallback;
   try {
-    config.id = await ask("会社ID（英小文字・数字・ハイフン）");
-    config.name = await ask("会社名");
-    config.timezone = await ask("タイムゾーン", "Asia/Tokyo");
-    const features = await ask("導入機能 meetings / reports / both", "meetings");
+    const id = await ask("会社ID（既存の会社IDなら設定を再利用）", values.instance ?? "");
+    const previous = await readJson(path.join(instanceDir(id), "company.json"), {});
+    const savedSecrets = await readJson(path.join(instanceDir(id), "secrets.json"), {});
+    config = { ...config, ...previous, id };
+    config.databases ??= {};
+    config.name = await ask("会社名", previous.name ?? "");
+    config.timezone = await ask("タイムゾーン", config.timezone);
+    const features = await ask("導入機能 meetings / reports / both", config.features.length === 2 ? "both" : config.features[0]);
     config.features = features === "both" ? ["meetings", "reports"] : [features];
     if (config.features.includes("meetings")) {
-      config.meetings = (await ask("会議名（カンマ区切り）", "週次定例")).split(",").map((v) => v.trim());
-      config.members = (await ask("担当者（カンマ区切り。空欄可）")).split(",").map((v) => v.trim()).filter(Boolean);
+      config.meetings = (await ask("会議名（カンマ区切り）", config.meetings.join(","))).split(",").map((v) => v.trim());
+      config.members = (await ask("担当者（カンマ区切り）", config.members.join(","))).split(",").map((v) => v.trim()).filter(Boolean);
     }
-    config.notionParent = await ask("Notionの親ページURL（先に連携へ共有してください）");
-    process.stdout.write("Notionトークン（入力は表示しません）: "); muted = true;
-    const notionToken = process.env.NOTION_TOKEN || (await rl.question("")).trim();
+    config.notionParent = await ask("Notionの親ページURL（既存ページで可。接続への共有が必要）", config.notionParent);
+    process.stdout.write("Notionトークン（既存の連携を利用可。保存済みなら空欄で維持・入力非表示）: "); muted = true;
+    const notionToken = process.env.NOTION_TOKEN || (await rl.question("")).trim() || savedSecrets.notionToken;
     muted = false; process.stdout.write("\n");
     const secrets = { notionToken };
+    if (!values.offline) {
+      const databases = (await children(notionClient(notionToken), notionId(config.notionParent))).filter((block) => block.type === "child_database");
+      console.log("親ページ内の既存DB:");
+      for (const db of databases) console.log(`  ${db.child_database.title}: ${db.id}`);
+      if (!databases.length) console.log("  なし");
+      for (const [key, schema] of Object.entries(schemas(config))) {
+        const input = await ask(`${schema.name}: 再利用するDBのURL/ID（空欄は専用名・標準名で自動照合）`, config.databases[key]?.id ?? "");
+        if (input) config.databases[key] = { id: notionId(input) };
+      }
+    }
     if (config.features.includes("reports")) {
       config.report.dashboardUrl = await ask("稼働ログのダッシュボードURL", config.report.dashboardUrl);
-      config.report.orgId = await ask("ダッシュボードの組織ID");
-      config.report.provider = await ask("レポートLLM openai-compatible / anthropic", "openai-compatible");
-      config.report.baseUrl = await ask("レポートLLMのAPIベースURL", config.report.provider === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1");
-      config.report.model = await ask("レポートLLMのモデル名");
+      config.report.orgId = await ask("ダッシュボードの既存組織ID（新規作成は不要）", config.report.orgId);
+      const oldProvider = config.report.provider;
+      config.report.provider = await ask("レポートLLM openai-compatible / anthropic", config.report.provider);
+      config.report.baseUrl = await ask("レポートLLMのAPIベースURL", oldProvider === config.report.provider ? config.report.baseUrl : config.report.provider === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1");
+      config.report.model = await ask("レポートLLMのモデル名", config.report.model);
       process.stdout.write("レポートLLMのAPIキー（入力非表示）: "); muted = true;
       secrets.reportKey = (await rl.question("")).trim(); muted = false; process.stdout.write("\n");
       process.stdout.write("組織の取り込みトークン（入力非表示）: "); muted = true;
@@ -52,29 +69,49 @@ async function wizard() {
   } finally { muted = false; rl.close(); }
 }
 async function setup() {
+  const info = await inspectEnvironment();
+  showEnvironment(info);
   let config, secrets;
   if (values.config) {
     config = validate(await readJson(path.resolve(values.config)));
     secrets = { notionToken: process.env.NOTION_TOKEN, reportKey: process.env.REPORT_LLM_API_KEY, ingestKey: process.env.INGEST_API_KEY };
   } else ({ config, secrets } = await wizard());
   const dir = instanceDir(config.id);
-  return withLock(dir, "setup", async () => {
   const previousSecrets = await readJson(path.join(dir, "secrets.json"), {});
   secrets = { ...previousSecrets, ...Object.fromEntries(Object.entries(secrets).filter(([, v]) => v)) };
   const previous = await readJson(path.join(dir, "company.json"), {});
-  if (previous.notionParent && previous.notionParent !== config.notionParent && Object.keys(previous.databases ?? {}).length) throw new Error("同じ会社IDで親ページを変更できません。別の会社IDを使用してください。");
+  if (previous.notionParent && notionId(previous.notionParent) !== notionId(config.notionParent) && Object.keys(previous.databases ?? {}).length) throw new Error("同じ会社IDで親ページを変更できません。別の会社IDを使用してください。");
   config.databases = { ...previous.databases, ...config.databases };
+  const modelConfigured = await hasConfiguredModel(dir);
+  let plan;
+  if (!values.offline) {
+    requireEnvironment(info, config);
+    plan = await planProvision(config, notionClient(secrets.notionToken));
+    console.log("実行予定（まだ作成していません）:");
+    for (const item of plan) console.log(`  ${item.action === "reuse" ? "再利用" : "新規作成"}: ${item.schema.name}${item.database ? ` (${item.database.id})` : ""}`);
+    if (config.features.includes("meetings")) console.log(`  LLM: ${modelConfigured ? "この会社の既存設定を維持" : "この会社専用の接続を設定"}`);
+    if (config.features.includes("reports")) console.log("  Dashboard: 指定された既存組織を利用（組織は作成しません）");
+  }
+  if (values.plan) { console.log("確認のみで終了しました。設定保存・作成はしていません。"); return; }
+  if (!values.offline && !values.yes) {
+    if (!process.stdin.isTTY) throw new Error("未承認のため変更していません。--planで確認後、適用する場合だけ--yesを指定してください。");
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try { if ((await rl.question("この計画を適用しますか？ [y/N]: ")).trim().toLowerCase() !== "y") { console.log("変更せず終了しました。"); return; } }
+    finally { rl.close(); }
+  }
+  return withLock(dir, "setup", async () => {
+  if (JSON.stringify(await readJson(path.join(dir, "company.json"), {})) !== JSON.stringify(previous)) throw new Error("確認後に会社設定が変更されました。再実行してください。");
   await writeJson(path.join(dir, "secrets.json"), secrets);
   await writeJson(path.join(dir, "company.json"), config);
   if (!values.offline) {
-    await provision(config, notionClient(secrets.notionToken), (c) => writeJson(path.join(dir, "company.json"), c));
+    await provision(config, notionClient(secrets.notionToken), (c) => writeJson(path.join(dir, "company.json"), c), plan);
   }
   await render(config, dir);
   await configureRuntime(dir, secrets, config);
   await writeJson(path.join(root, "instances/current.json"), { id: config.id });
   console.log(`設定を保存しました: instances/${config.id}`);
   if (values.offline) { console.log("オフライン設定のみです。Notion作成・接続は未確認です。"); return; }
-  if (config.features.includes("meetings")) {
+  if (config.features.includes("meetings") && !modelConfigured) {
     console.log("この会社専用のLLMを選択します。認証もHermesの案内で設定できます。");
     await execute("hermes", ["model"], { cwd: path.join(dir, "workspace"), env: environment(dir, secrets, config) });
   }
@@ -108,6 +145,7 @@ async function doctor(config, dir, secrets) {
 }
 try {
   if (command === "setup") await setup();
+  else if (command === "inspect") showEnvironment(await inspectEnvironment());
   else {
     const { config, dir, secrets } = await load();
     const options = { env: environment(dir, secrets, config), cwd: path.join(dir, "workspace") };
