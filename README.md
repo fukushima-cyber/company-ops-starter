@@ -60,6 +60,14 @@ npm start
 
 無接続で配線だけ確認する場合は`npm run setup -- --config company.example.json --offline`。これはNotion作成やLLM認証を行いません。非対話の設定投入では`--config`を使い、`NOTION_TOKEN`、`INGEST_API_KEY`、`REPORT_LLM_API_KEY`は秘密情報管理から環境変数へ渡してください。議事録LLMの初回選択は対話式です。
 
+## ログ未着の通知
+
+reports利用時は、ダッシュボードの「設定 → ログ未着の通知」で勤務曜日・時間帯・猶予・休業日・除外社員・Slack Webhookを設定できます。ダッシュボードへの`0009_log_monitor.sql`適用と社員エージェント更新が必要です。初期状態は無効で、通知先も自動流用しません。
+
+`npm start`ではAI分析と別のループで10分おきにチェックします。LLMやNotionが未接続でも監視だけ動かす場合は`npm run monitor -- --instance <会社ID>`を別サービスとして起動します。取り込みトークンのみ使用し、監視にLLM費用はかかりません。通知済み状態はサーバー側D1に保存されます。
+
+詳細と制約は[ログ監視の運用ガイド](https://github.com/fukushima-cyber/mac-activity-report/blob/codex/report-reliability/docs/log-monitor.md)を参照してください。監視サービス自体の停止通知は別途、導入先の死活監視へ接続します。
+
 ## 受入テスト
 
 まず専用のテスト用Notion親ページで実施してください。

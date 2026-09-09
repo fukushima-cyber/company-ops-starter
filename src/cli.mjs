@@ -12,6 +12,7 @@ import { complete, apiSettings } from "../report/llm-api.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { withLock } from "./lock.mjs";
 import { inspectEnvironment, showEnvironment, requireEnvironment, hasConfiguredModel } from "./preflight.mjs";
+import { checkLogMonitor } from "../report/check-log-monitor.mjs";
 
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   instance: { type: "string" }, config: { type: "string" }, offline: { type: "boolean" },
@@ -123,6 +124,14 @@ async function load() {
   const dir = instanceDir(id);
   return { dir, config: validate(await readJson(path.join(dir, "company.json"))), secrets: await readJson(path.join(dir, "secrets.json")) };
 }
+async function watchMonitor(config, dir, secrets, signal) {
+  if (!config.features.includes("reports") || !secrets.ingestKey) throw new Error("reportsと取り込みトークンが必要です。");
+  while (!signal.aborted) {
+    try { await checkLogMonitor(reportEnvironment(config, dir, secrets)); }
+    catch (error) { console.error(`ログ監視に失敗（10分後に再試行）: ${error.message}`); }
+    await delay(10 * 60_000, undefined, { signal });
+  }
+}
 async function doctor(config, dir, secrets) {
   const api = notionClient(secrets.notionToken);
   await api("/users/me");
@@ -152,15 +161,16 @@ try {
     if (command === "doctor") await doctor(config, dir, secrets);
     else if (command === "llm") await execute("hermes", ["model"], options);
     else if (command === "jobs") { await doctor(config, dir, secrets); await withLock(dir, "jobs", () => registerJobs(config, dir, secrets)); }
-    else if (command === "start") {
-      await doctor(config, dir, secrets);
+    else if (command === "start" || command === "monitor") {
+      if (command === "start") await doctor(config, dir, secrets);
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once("SIGTERM", stop); process.once("SIGINT", stop);
       const signal = controller.signal;
       const tasks = [];
-      if (config.features.includes("meetings")) tasks.push(execute("hermes", ["gateway", "run"], { ...options, signal }).then(() => { throw new Error("Hermes gatewayが停止しました。"); }));
-      if (config.features.includes("reports")) tasks.push((async () => {
+      if (command === "monitor" || config.features.includes("reports")) tasks.push(watchMonitor(config, dir, secrets, signal));
+      if (command === "start" && config.features.includes("meetings")) tasks.push(execute("hermes", ["gateway", "run"], { ...options, signal }).then(() => { throw new Error("Hermes gatewayが停止しました。"); }));
+      if (command === "start" && config.features.includes("reports")) tasks.push((async () => {
         while (!signal.aborted) {
           try { await runReport(config, dir, secrets, [], execute, signal); }
           catch (error) { console.error(`レポート失敗（30分後に再試行）: ${error.message}`); }

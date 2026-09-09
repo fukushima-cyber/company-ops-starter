@@ -6,6 +6,7 @@
   "engines": { "node": ">=24" },
   "scripts": {
     "inspect": "node src/cli.mjs inspect",
+    "monitor": "node src/cli.mjs monitor",
     "setup": "node src/cli.mjs setup",
     "doctor": "node src/cli.mjs doctor",
     "llm": "node src/cli.mjs llm",

@@ -14,6 +14,7 @@ test("fresh checkout offline setup works twice and generates a usable scoped con
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   for (const item of ["src", "templates", "company.example.json", "package.json"]) await fs.cp(path.join(root, item), path.join(dir, item), { recursive: true });
   await fs.mkdir(path.join(dir, "report")); await fs.copyFile(path.join(root, "report/llm-api.mjs"), path.join(dir, "report/llm-api.mjs"));
+  await fs.copyFile(path.join(root, "report/check-log-monitor.mjs"), path.join(dir, "report/check-log-monitor.mjs"));
   await fs.symlink(path.join(root, "node_modules"), path.join(dir, "node_modules"), "dir");
   const inspected = await exec(process.execPath, ["src/cli.mjs", "inspect"], { cwd: dir });
   assert.match(inspected.stdout, /読み取りのみ/);
