@@ -1,0 +1,19 @@
+{
+  "name": "company-ops-starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "setup": "node src/cli.mjs setup",
+    "doctor": "node src/cli.mjs doctor",
+    "llm": "node src/cli.mjs llm",
+    "jobs": "node src/cli.mjs jobs",
+    "start": "node src/cli.mjs start",
+    "report": "node src/cli.mjs report",
+    "verify:llm": "node src/cli.mjs verify-llm",
+    "test": "node --test test/*.test.mjs report/*.test.mjs"
+  },
+  "dependencies": { "@notionhq/notion-mcp-server": "2.5.1", "yaml": "^2.8.1" },
+  "overrides": { "qs": "6.16.0" }
+}

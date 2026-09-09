@@ -1,0 +1,18 @@
+{
+  "id": "example-company",
+  "name": "Example Company",
+  "timezone": "Asia/Tokyo",
+  "features": ["meetings"],
+  "meetings": ["週次定例"],
+  "members": ["担当者A", "担当者B"],
+  "cleanupDays": 0,
+  "notionParent": "",
+  "databases": {},
+  "report": {
+    "dashboardUrl": "https://log.bonkers.llc",
+    "orgId": "",
+    "provider": "openai-compatible",
+    "baseUrl": "https://api.openai.com/v1",
+    "model": ""
+  }
+}

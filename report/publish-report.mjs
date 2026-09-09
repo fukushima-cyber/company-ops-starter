@@ -1,0 +1,137 @@
+// AIが出した分析JSON(標準入力 or 引数のファイル)を受け取り、
+// Notion(組織ごとのトークンでREST API直叩き)とダッシュボードへ書き込む。決定的処理・AI不使用。
+import fs from "node:fs/promises";
+import path from "node:path";
+import { upsertReportPage, timelineToBlocks } from "./notion-api.mjs";
+import { computeAppTotals } from "./aggregate-apps.mjs";
+import { publishReports } from "./publish-pipeline.mjs";
+import { validateAnalysis } from "./report-validation.mjs";
+
+const DASHBOARD_URL = process.env.DASHBOARD_URL ?? "https://log.bonkers.llc";
+const INGEST_API_KEY = process.env.INGEST_API_KEY;
+const NOTION_REPORT_DB_URL = process.env.NOTION_REPORT_DB_URL;
+const SHARED_DRIVE_PATH = process.env.SHARED_DRIVE_PATH;
+const DATE = process.argv[2];
+const INPUT_FILE = process.argv[3];
+
+async function readAppTotals(employeeSlug) {
+  if (!SHARED_DRIVE_PATH) return [];
+  try {
+    const raw = JSON.parse(
+      await fs.readFile(path.join(SHARED_DRIVE_PATH, `${DATE}_${employeeSlug}.json`), "utf-8")
+    );
+    return computeAppTotals(raw.windows);
+  } catch {
+    return [];
+  }
+}
+
+// /api/employees/.../public は認証無しの公開エンドポイントのため氏名は返さない。
+// 表示名の取得は、INGEST_API_KEYで認証する/api/notion-token(この社員のトークンを取りに行くのと同じ呼び出し)に寄せる。
+async function fetchNotionToken(employeeSlug) {
+  if (!INGEST_API_KEY) return { token: null, reportDbUrl: null, name: null };
+  const url = new URL(`${DASHBOARD_URL}/api/notion-token`);
+  if (employeeSlug) url.searchParams.set("employee", employeeSlug);
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${INGEST_API_KEY}` }, signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`Notion設定の取得に失敗しました: ${res.status}`);
+  const json = await res.json();
+  return { token: json.token ?? null, reportDbUrl: json.report_db_url ?? null, name: json.name ?? null };
+}
+
+async function main() {
+  if (!DATE || !INPUT_FILE) {
+    console.error("使い方: node publish-report.mjs <DATE> <分析結果JSONファイル>");
+    process.exit(1);
+  }
+  const raw = await fs.readFile(INPUT_FILE, "utf-8");
+  let reports;
+  try {
+    reports = JSON.parse(raw);
+  } catch {
+    console.error("AIの出力がJSONとして解釈できませんでした。");
+    process.exit(1);
+  }
+  if (!Array.isArray(reports)) throw new Error("Expected a report array");
+  if (reports.length === 0) {
+    console.log("対象レポートなし");
+    return;
+  }
+
+  if (!INGEST_API_KEY) throw new Error("INGEST_API_KEY is required");
+  if (!SHARED_DRIVE_PATH) throw new Error("Source log directory is required");
+  const sourceFiles = new Set(await fs.readdir(SHARED_DRIVE_PATH));
+  const seen = new Set();
+  for (const report of reports) {
+    validateAnalysis([report], report?.employee_slug);
+    if (!sourceFiles.has(`${DATE}_${report.employee_slug}.json`) || seen.has(report.employee_slug)) {
+      throw new Error("Missing or duplicate source employee");
+    }
+    seen.add(report.employee_slug);
+  }
+  let versions = {};
+  try {
+    versions = JSON.parse(await fs.readFile(path.join(SHARED_DRIVE_PATH, ".source-versions.json"), "utf-8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  await publishReports(reports, {
+    // Notionトークン取得(社員ごとの個別設定があればそちらを優先、無ければ組織共通)と同じ認証済み呼び出しで、
+    // 登録された正式名も一緒に取得する。表示名はAIの推測に任せず、これで上書きする(未登録なら元の値のまま)
+    notionConfig: async (slug) => {
+      const config = await fetchNotionToken(slug);
+      if (process.env.NOTION_TOKEN) {
+        if (!NOTION_REPORT_DB_URL) throw new Error("NOTION_REPORT_DB_URL is required with a local NOTION_TOKEN");
+        return { token: process.env.NOTION_TOKEN, reportDbUrl: NOTION_REPORT_DB_URL, name: config.name };
+      }
+      return { ...config, reportDbUrl: config.reportDbUrl ?? NOTION_REPORT_DB_URL };
+    },
+
+    // ダッシュボードへ
+    publishDashboard: async (r) => {
+      const res = await fetch(`${DASHBOARD_URL}/api/reports/ingest`, {
+        method: "POST",
+        signal: AbortSignal.timeout(30_000),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${INGEST_API_KEY}` },
+        body: JSON.stringify({
+          employee_slug: r.employee_slug,
+          employee_name: r.employee_name,
+          date: DATE,
+          active_hours: r.active_hours,
+          window_count: r.window_count,
+          summary: r.summary,
+          waste_notes: r.waste_notes,
+          automation_notes: r.automation_notes,
+          timeline: r.timeline,
+          source_upload_version: versions[r.employee_slug] ?? undefined,
+        }),
+      });
+      if (!res.ok) throw new Error(`ダッシュボード送信失敗: ${res.status}`);
+      console.log(`ダッシュボードへ送信(${r.employee_name}): 成功`);
+    },
+
+    // Notionへ(社員ごとの個別設定があればそちらを優先、無ければ組織共通)
+    publishNotion: async (r, { token: notionToken, reportDbUrl }) => {
+        const appTotals = await readAppTotals(r.employee_slug);
+        const children = timelineToBlocks(r.timeline ?? [], r.day_note, appTotals);
+        await upsertReportPage(notionToken, reportDbUrl, {
+          keyValue: `${DATE}_${r.employee_slug}`,          // 上書き判定用の安定した識別子(名前を変えても変わらない)
+          titleValue: DATE,                                // 1列目(タイトル)は日付だけ
+          properties: {
+            employeeName: r.employee_name,                 // 2列目「社員」に表示名
+            activeHours: r.active_hours,
+            summary: r.summary,
+            wasteNotes: r.waste_notes,
+            automationNotes: r.automation_notes,
+            windowCount: r.window_count,
+          },
+          children,
+        });
+        console.log(`Notionへ書き込み完了(${r.employee_name})`);
+    },
+  });
+}
+
+main().catch((err) => {
+  console.error("エラー:", err.message);
+  process.exit(1);
+});
